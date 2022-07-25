@@ -506,6 +506,7 @@ class cfnet(nn.Module):
 
         gwc_volume6 = build_gwc_volume(features_left["gw6"], features_right["gw6"], self.maxdisp // 32,
                                        self.num_groups)
+        
         if self.use_concat_volume:
             concat_volume4 = build_concat_volume(features_left["concat_feature4"], features_right["concat_feature4"],
                                                  self.maxdisp // 8)
@@ -647,7 +648,7 @@ class cfnet(nn.Module):
             pred1_s2 = F.upsample(pred1_s2 * 2, [left.size()[2], left.size()[3]], mode='bilinear', align_corners=True)
             pred1_s2 = torch.squeeze(pred1_s2, 1)
 
-            return [pred0_4, pred1_4, pred0_s3, predmid_s3, pred0_s2, predmid_s2,pred2_s4, pred1_s3_up, pred1_s2,cost1_s2 ]
+            return [pred0_4, pred1_4, pred2_s4, pred0_s3, predmid_s3, pred1_s3_up, pred0_s2, predmid_s2, pred1_s2,cost1_s2 ]
 
         else:
             pred2_s4 = F.upsample(pred2_s4 * 8, [left.size()[2], left.size()[3]], mode='bilinear', align_corners=True)

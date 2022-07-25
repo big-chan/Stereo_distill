@@ -26,7 +26,7 @@ import networks
 from IPython import embed
 import random
 import tarfile
-from psmmodels import *
+# from psmmodels import *
 from models.cfnet import cfnet
 def set_random_seed(seed):
     if seed >= 0:
@@ -97,13 +97,6 @@ class Trainer:
         if self.opt.model=="stereo":
             self.models["depth"] = cfnet(192,use_concat_volume=True)
         else:
-#             self.models["encoder"] = networks.ResnetEncoder(
-#                 self.opt.num_layers, self.opt.weights_init == "pretrained")
-#             self.models["encoder"].to(self.device)
-#             self.parameters_to_train += list(self.models["encoder"].parameters())
-
-#             self.models["depth"] = networks.DepthDecoder(
-#                 self.models["encoder"].num_ch_enc, self.opt.scales)
             self.models["depth"] = networks.DepthGenerator(self.opt)
         self.models["depth"].to(self.device)
         self.parameters_to_train += list(self.models["depth"].parameters())
@@ -293,100 +286,25 @@ class Trainer:
         else:
             # Otherwise, we only feed the image with frame_id 0 through the depth encoder
             if self.opt.model=="stereo":
-                outputs_stereo={}
-                outputs = self.models["depth"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0])
-                outputs_stereo["stereo_disp"]=outputs[:-1]
+                outputs={}
+                outputs["stereo_disp"]= self.models["depth"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0])[:-1]
             else:
-#                 features = self.models["encoder"](inputs["color_aug", 0, 0])
-#                 outputs = self.models["depth"](features)
-#                 outputs = self.models["depth"](inputs["color_aug", 0, 0])
-                
-                outputs = self.models["depth"](inputs)
-                outputs_stereo={}
-                outputs_stereo["stereo_disp"]=self.models["depth"].stereo_model(inputs["color_aug", 0, 2], inputs["color_aug", "s", 2])[:-1]
-#                 import pdb;pdb.set_trace()
-#             import pdb;pdb.set_trace()
+                outputs = self.models["depth"](inputs["color_aug", 0, 0])
         if self.opt.predictive_mask:
             outputs["predictive_mask"] = self.models["predictive_mask"](features)
 
         if self.use_pose_net:
             outputs.update(self.predict_poses(inputs, features))
-
-#         self.generate_images_pred(inputs, outputs)
-#         self.generate_images_pred_bf(inputs, outputs)
-#         self.generate_images_pred_stereo(inputs, outputs)
-        self.generate_images_pred_stereo(inputs, outputs_stereo)
-#         import pdb;pdb.set_trace()
-#         losses = self.compute_losses(inputs, outputs)
-#         losses["loss"]*=2
-#         losses_stereo = self.compute_losses_stero(inputs, outputs)
-#         losses_bf = self.compute_losses_bf(inputs, outputs)
-#         losses_stereo_low = self.compute_losses_stereo_low(inputs, outputs)
-        losses_stereo_high = self.compute_losses_stero(inputs, outputs_stereo)
-#         losses["loss"]+=losses_stereo["loss"]
-#         losses["loss"]+=losses_bf["loss"]
-#         losses["loss"]+=losses_stereo_low
-#         losses["loss"]+=losses_stereo_high["loss"]
-        
-        return outputs, losses_stereo_high
-
-    def predict_poses(self, inputs, features):
-        """Predict poses between input frames for monocular sequences.
-        """
-        outputs = {}
-        if self.num_pose_frames == 2:
-            # In this setting, we compute the pose to each source frame via a
-            # separate forward pass through the pose network.
-
-            # select what features the pose network takes as input
-            if self.opt.pose_model_type == "shared":
-                pose_feats = {f_i: features[f_i] for f_i in self.opt.frame_ids}
-            else:
-                pose_feats = {f_i: inputs["color_aug", f_i, 0] for f_i in self.opt.frame_ids}
-
-            for f_i in self.opt.frame_ids[1:]:
-                if f_i != "s":
-                    # To maintain ordering we always pass frames in temporal order
-                    if f_i < 0:
-                        pose_inputs = [pose_feats[f_i], pose_feats[0]]
-                    else:
-                        pose_inputs = [pose_feats[0], pose_feats[f_i]]
-
-                    if self.opt.pose_model_type == "separate_resnet":
-                        pose_inputs = [self.models["pose_encoder"](torch.cat(pose_inputs, 1))]
-                    elif self.opt.pose_model_type == "posecnn":
-                        pose_inputs = torch.cat(pose_inputs, 1)
-
-                    axisangle, translation = self.models["pose"](pose_inputs)
-                    outputs[("axisangle", 0, f_i)] = axisangle
-                    outputs[("translation", 0, f_i)] = translation
-
-                    # Invert the matrix if the frame id is negative
-                    outputs[("cam_T_cam", 0, f_i)] = transformation_from_parameters(
-                        axisangle[:, 0], translation[:, 0], invert=(f_i < 0))
-
+        if self.opt.model=="stereo":
+            self.generate_images_pred_stereo(inputs, outputs)
+            losses = self.compute_losses_stereo(inputs, outputs)
         else:
-            # Here we input all frames to the pose net (and predict all poses) together
-            if self.opt.pose_model_type in ["separate_resnet", "posecnn"]:
-                pose_inputs = torch.cat(
-                    [inputs[("color_aug", i, 0)] for i in self.opt.frame_ids if i != "s"], 1)
+            self.generate_images_pred(inputs, outputs)
+            losses = self.compute_losses(inputs, outputs)
+        
+        return outputs, losses
 
-                if self.opt.pose_model_type == "separate_resnet":
-                    pose_inputs = [self.models["pose_encoder"](pose_inputs)]
-
-            elif self.opt.pose_model_type == "shared":
-                pose_inputs = [features[i] for i in self.opt.frame_ids if i != "s"]
-
-            axisangle, translation = self.models["pose"](pose_inputs)
-
-            for i, f_i in enumerate(self.opt.frame_ids[1:]):
-                if f_i != "s":
-                    outputs[("axisangle", 0, f_i)] = axisangle
-                    outputs[("translation", 0, f_i)] = translation
-                    outputs[("cam_T_cam", 0, f_i)] = transformation_from_parameters(
-                        axisangle[:, i], translation[:, i])
-
-        return outputs
+    
 
     def val(self):
         """Validate the model on a single minibatch
@@ -401,93 +319,17 @@ class Trainer:
         with torch.no_grad():
             outputs, losses = self.process_batch(inputs)
 
-#             if "depth_gt" in inputs:
-#                 self.compute_depth_losses(inputs, outputs, losses)
 
             self.log("val", inputs, outputs, losses)
             del inputs, outputs, losses
 
         self.set_train()
-    def generate_images_pred_depth(self, inputs, outputs):
-        """Generate the warped (reprojected) color images for a minibatch.
-        Generated images are saved into the `outputs` dictionary.
-        """
-        for scale in self.opt.scales:
-            disp = outputs[("disp", scale)]
-            if self.opt.v1_multiscale:
-                source_scale = scale
-            else:
-                disp = F.interpolate(
-                    disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
-                source_scale = 0
-            if self.opt.model=="stereo":
-                depth=disp
-            else:
-
-                _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
-
-            outputs[("depth", 0, scale)] = depth
-    def generate_images_pred_bf(self, inputs, outputs):
-        """Generate the warped (reprojected) color images for a minibatch.
-        Generated images are saved into the `outputs` dictionary.
-        """
-        scale=1
-#         for scale in self.opt.scales:
-        depth = outputs["depth_bf"]
-#         if self.opt.v1_multiscale:
-#             source_scale = scale
-#         else:
-        depth = F.interpolate(
-            depth, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
-        source_scale = 0
-#         if self.opt.model=="stereo":
-#             depth=disp
-#         else:
-
-#             _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
-
-        outputs[("depth", 0, scale,"bf")] = depth
-
-        for i, frame_id in enumerate(self.opt.frame_ids[1:]):
-
-            if frame_id == "s":
-                T = inputs["stereo_T"]
-            else:
-                T = outputs[("cam_T_cam", 0, frame_id)]
-
-            # from the authors of https://arxiv.org/abs/1712.00175
-            if self.opt.pose_model_type == "posecnn":
-
-                axisangle = outputs[("axisangle", 0, frame_id)]
-                translation = outputs[("translation", 0, frame_id)]
-
-                inv_depth = 1 / depth
-                mean_inv_depth = inv_depth.mean(3, True).mean(2, True)
-
-                T = transformation_from_parameters(
-                    axisangle[:, 0], translation[:, 0] * mean_inv_depth[:, 0], frame_id < 0)
-
-            cam_points = self.backproject_depth[source_scale](
-                depth, inputs[("inv_K", source_scale)])
-            pix_coords = self.project_3d[source_scale](
-                cam_points, inputs[("K", source_scale)], T)
-
-            outputs[("sample", frame_id, scale)] = pix_coords
-
-            outputs[("color", frame_id, scale,"bf")] = F.grid_sample(
-                inputs[("color", frame_id, source_scale)],
-                pix_coords,
-                padding_mode="border")
-
-            if not self.opt.disable_automasking:
-                outputs[("color_identity", frame_id, scale,"bf")] = \
-                    inputs[("color", frame_id, source_scale)]   
     def generate_images_pred_stereo(self, inputs, outputs):
         """Generate the warped (reprojected) color images for a minibatch.
         Generated images are saved into the `outputs` dictionary.
         """
         st_output = outputs["stereo_disp"]
-        scale=1
+        scale=0
         for i in range(len(st_output)):
             disp = st_output[i].unsqueeze(1)
             if self.opt.v1_multiscale:
@@ -528,16 +370,12 @@ class Trainer:
                 pix_coords = self.project_3d[source_scale](
                     cam_points, inputs[("K", source_scale)], T)
 
-#                 outputs[("sample", frame_id, scale)] = pix_coords
-#                 print(frame_id,scale,i)
                 outputs[("color", frame_id, scale,"stereo",i)] = F.grid_sample(
                     inputs[("color", frame_id, source_scale)],
                     pix_coords,
                     padding_mode="border")
 
-                if not self.opt.disable_automasking:
-                    outputs[("color_identity", frame_id, scale)] = \
-                        inputs[("color", frame_id, source_scale)]
+
                     
     def generate_images_pred(self, inputs, outputs):
         """Generate the warped (reprojected) color images for a minibatch.
@@ -594,56 +432,6 @@ class Trainer:
                     outputs[("color_identity", frame_id, scale)] = \
                         inputs[("color", frame_id, source_scale)]
                     
-    def generate_images_pred_gt(self, inputs, outputs_depth,outputs):
-        """Generate the warped (reprojected) color images for a minibatch.
-        Generated images are saved into the `outputs` dictionary.
-        """
-        depth=outputs_depth
-#         depth = F.interpolate(
-#                     depth, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
-        
-        scale=-1
-        source_scale=0
-        source_scale_gt=-1
-        source_color=F.interpolate(
-                    inputs[("color", "s", source_scale)], [375, 1242], mode="bilinear", align_corners=False)
-        target_color=F.interpolate(
-                    inputs[("color", 0, source_scale)], [375, 1242], mode="bilinear", align_corners=False)
-
-        for i, frame_id in enumerate(self.opt.frame_ids[1:]):
-
-            if frame_id == "s":
-                T = inputs["stereo_T"]
-            else:
-                T = outputs[("cam_T_cam", 0, frame_id)]
-
-            # from the authors of https://arxiv.org/abs/1712.00175
-            if self.opt.pose_model_type == "posecnn":
-
-                axisangle = outputs[("axisangle", 0, frame_id)]
-                translation = outputs[("translation", 0, frame_id)]
-
-                inv_depth = 1 / depth
-                mean_inv_depth = inv_depth.mean(3, True).mean(2, True)
-                
-                T = transformation_from_parameters(
-                    axisangle[:, 0], translation[:, 0] * mean_inv_depth[:, 0], frame_id < 0)
-
-            cam_points = self.backproject_depth[source_scale_gt](
-                depth, inputs[("inv_K", source_scale_gt)])
-            pix_coords = self.project_3d[source_scale_gt](
-                cam_points, inputs[("K", source_scale_gt)], T)
-            outputs[("color", frame_id, scale)] = F.grid_sample(
-                source_color,
-                pix_coords,
-                padding_mode="border")
-            loss=self.compute_reprojection_loss(outputs[("color", frame_id, scale)], target_color)
-            mask_up=torch.quantile(loss, 0.75)
-            mask_down=torch.quantile(loss, 0.07)
-            outputs["mask_gt"]=(loss<mask_up)*(loss>=mask_down)
-#             outputs["mask_gt"]=loss<mask_up
-#             import pdb;pdb.set_trace()
-#          torch.quantile(loss, torch.tensor([0.25, 0.5, 0.75]), dim=1, keepdim=True)
     def compute_reprojection_loss(self, pred, target):
         """Computes reprojection loss between a batch of predicted and target images
         """
@@ -755,13 +543,14 @@ class Trainer:
         losses["loss"] = total_loss
         return losses
     
-    def compute_losses_stero(self, inputs, outputs):
+    def compute_losses_stereo(self, inputs, outputs):
         """Compute the reprojection and smoothness losses for a minibatch
         """
         losses = {}
         total_loss = 0
-        scale=1
+        scale=0
         st_output = outputs["stereo_disp"]
+        weights = [0.5 * 0.5, 0.5 * 0.7, 0.5 * 1.0, 1 * 0.5, 1 * 0.7, 1 * 1.0, 2 * 0.5, 2 * 0.7, 2 * 1.0] 
         for i in range(len(st_output)):
             loss = 0
             reprojection_losses = []
@@ -839,86 +628,14 @@ class Trainer:
                     import pdb;pdb.set_trace()
             
             loss += self.opt.disparity_smoothness * smooth_loss / (2 ** scale)
-            total_loss += loss
+            total_loss += weights[i]*loss
             losses["loss_stereo/{}".format(i)] = loss
         total_loss += loss
         total_loss /= len(st_output)#+1
         losses["loss"] = total_loss
         return losses
-    def compute_losses_stereo_low(self, inputs, outputs):
-        for frame_id in self.opt.frame_ids[1:]:
-            pred = outputs["right_image_low"]
-            right_loss=self.compute_reprojection_loss(pred, inputs[("color", "s", 1)]).mean()
-        return right_loss
-    def compute_losses_bf(self, inputs, outputs):
-        losses={}
-        ###############################$$$$$########################################################
-        total_loss = 0
-        scale=1
-        reprojection_losses = []
-        loss = 0
-        source_scale=0
-        target = inputs[("color", 0, source_scale)]
-        color = inputs[("color", 0, scale)]
-        disp=1/outputs["depth_bf"]
-#         loss+=right_loss
-        for frame_id in self.opt.frame_ids[1:]:
-            pred = outputs[("color", frame_id, scale,"bf")]
-            reprojection_losses.append(self.compute_reprojection_loss(pred, target))
+    
 
-        reprojection_losses = torch.cat(reprojection_losses, 1)
-
-        if not self.opt.disable_automasking:
-            identity_reprojection_losses = []
-            for frame_id in self.opt.frame_ids[1:]:
-                pred = inputs[("color", frame_id, source_scale)]
-                identity_reprojection_losses.append(
-                    self.compute_reprojection_loss(pred, target))
-
-            identity_reprojection_losses = torch.cat(identity_reprojection_losses, 1)
-
-            if self.opt.avg_reprojection:
-                identity_reprojection_loss = identity_reprojection_losses.mean(1, keepdim=True)
-            else:
-                # save both images, and do min all at once below
-                identity_reprojection_loss = identity_reprojection_losses
-
-        if self.opt.avg_reprojection:
-            reprojection_loss = reprojection_losses.mean(1, keepdim=True)
-        else:
-            reprojection_loss = reprojection_losses
-
-        if not self.opt.disable_automasking:
-            # add random numbers to break ties
-            identity_reprojection_loss += torch.randn(
-                identity_reprojection_loss.shape, device=self.device) * 0.00001
-
-            combined = torch.cat((identity_reprojection_loss, reprojection_loss), dim=1)
-        else:
-            combined = reprojection_loss
-
-        if combined.shape[1] == 1:
-            to_optimise = combined
-        else:
-            to_optimise, idxs = torch.min(combined, dim=1)
-
-        loss += to_optimise.mean()
-        mean_disp = disp.mean(2, True).mean(3, True)
-        norm_disp = disp / (mean_disp + 1e-7)
-        try:
-            if self.opt.model=="stereo":
-                smooth_loss = get_smooth_loss(norm_disp, color)
-            else:
-                smooth_loss = get_smooth_loss(norm_disp, color)
-        except:
-                import pdb;pdb.set_trace()
-
-        loss += self.opt.disparity_smoothness * smooth_loss / (2 ** scale)
-        total_loss += loss
-        losses["loss_bf"] = loss
-#         total_loss /= len(st_output)+1
-        losses["loss"] = total_loss
-        return losses
     def compute_depth_losses(self, inputs, outputs,mask_over_floor=None):
         """Compute depth metrics, to allow monitoring during training
 
@@ -937,14 +654,9 @@ class Trainer:
             h,w=depth_pred.shape[-2:]
             depth_gt= outputs*5.4
             crop=torch.zeros_like(depth_pred)
-#             crop[:,:,75:,42:-42]=1
-#             crop=crop.type(torch.BoolTensor).cuda()
+
             depth_gt = F.interpolate(depth_gt, [h, w], mode="bilinear", align_corners=False)
             mask = (depth_gt > 1.0)*(depth_gt <= 80.0)
-#             mask*=crop
-#             mask*=inputs["mask_gt"]
-
-#             loss_SSIM+=self.ssim(depth_gt,depth_pred_*5.4)[mask].mean()
             
             depth_gt = depth_gt[mask]
             depth_pred = depth_pred[mask]
@@ -953,10 +665,6 @@ class Trainer:
             inputs["mask/{}".format(i)]=mask
         loss_total+=loss_log+loss_abs #+loss_SSIM
         losses["loss"] = loss_total/len(self.opt.scales)
-#         losses["ssim"] = loss_SSIM/len(self.opt.scales)
-#         losses["abs"] = loss_abs/len(self.opt.scales)
-#         losses["log"] = loss_log/len(self.opt.scales)
-        
         return losses
 
     def log_time(self, batch_idx, duration, loss):
@@ -970,10 +678,11 @@ class Trainer:
             " | loss: {:.5f} | time elapsed: {} | time left: {}"
         print(print_string.format(self.epoch, batch_idx, samples_per_sec, loss,
                                   sec_to_hm_str(time_sofar), sec_to_hm_str(training_time_left)))
-#     def log_eval(self, evalresult):
-#         writer = self.writers["val"]
-#         for l, v in evalresult.items():
-#             writer.add_scalar({"{}".format(l): v, self.step})
+    def log_eval(self, evalresult):
+        writer = self.writers["val"]
+        for l, v in evalresult.items():
+            writer.add_scalar({"{}".format(l), v, self.step})
+            
     def log(self, mode, inputs, outputs, losses):
         """Write an event to the tensorboard events file
         """
@@ -985,55 +694,49 @@ class Trainer:
 #                     "depht_gt/{}".format(j),
 #                     normalize_image(inputs["depth_gt"][j]), self.step)
 #             ################################################################################
-#             frame_id="s"
-#             s=2
-# #             import pdb;pdb.set_trace()
-#             for ii in range(len(outputs["stereo_disp"])):
-#                 try:
-#                     writer.add_image(
-#                                 "color_pred_stereo_{}_{}/{}".format(frame_id, s, j),
-#                                 outputs[("color", "s", 1,"stereo",ii)][j].data, self.step)
-#                 except:
-#                     import pdb;pdb.set_trace()
-#                 writer.add_image(
-#                     "disp_{}_stereo_{}/{}".format(s,ii, j),
-#                     normalize_image(outputs["stereo_disp"][ii][j].unsqueeze(0)), self.step)
-#             writer.add_image(
-#                             "color_pred_right_low",
-#                             outputs["right_image_low"][j].data, self.step)
-#             writer.add_image(
-#                             "color_pred_bf_{}_{}/{}".format(frame_id, s, j),
-#                             outputs[("color", "s", 1,"bf")][j].data, self.step)
-#             writer.add_image(
-#                     "depth_{}_bf/{}".format(s, j),
-#                     normalize_image(outputs["depth_bf"][j]), self.step)
-#             ################################################################################
-            for s in self.opt.scales:
-                for frame_id in self.opt.frame_ids:
+            if self.opt.model=="stereo":
+                frame_id="s"
+                s=0
+#                 import pdb;pdb.set_trace()
+    # #             import pdb;pdb.set_trace()
+                for ii in range(len(outputs["stereo_disp"])):
+                    try:
+                        writer.add_image(
+                                    "color_pred_stereo_{}_{}/{}".format(frame_id, s, j),
+                                    outputs[("color", "s", 0,"stereo",ii)][j].data, self.step)
+                    except:
+                        import pdb;pdb.set_trace()
                     writer.add_image(
-                        "color_{}_{}/{}".format(frame_id, s, j),
-                        inputs[("color", frame_id, s)][j].data, self.step)
-#                     if s == 0 and frame_id != 0:
-#                         writer.add_image(
-#                             "color_pred_{}_{}/{}".format(frame_id, s, j),
-#                             outputs[("color", frame_id, s)][j].data, self.step)
+                        "disp_{}_stereo_{}/{}".format(s,ii, j),
+                        normalize_image(outputs["stereo_disp"][ii][j].unsqueeze(0)), self.step)
+#             ################################################################################
+            else:
+                for s in self.opt.scales:
+                    for frame_id in self.opt.frame_ids:
+                        writer.add_image(
+                            "color_{}_{}/{}".format(frame_id, s, j),
+                            inputs[("color", frame_id, s)][j].data, self.step)
+                        if s == 0 and frame_id != 0:
+                            writer.add_image(
+                                "color_pred_{}_{}/{}".format(frame_id, s, j),
+                                outputs[("color", frame_id, s)][j].data, self.step)
 
-#                 writer.add_image(
-#                     "disp_{}/{}".format(s, j),
-#                     normalize_image(outputs[("disp", s)][j]), self.step)
+                    writer.add_image(
+                        "disp_{}/{}".format(s, j),
+                        normalize_image(outputs[("disp", s)][j]), self.step)
                 
 #                 writer.add_image("mask_gt_{}/{}".format( s,j),outputs["mask/{}".format(s)][j].float(),self.step)
-#                 if self.opt.predictive_mask:
-#                     for f_idx, frame_id in enumerate(self.opt.frame_ids[1:]):
-#                         writer.add_image(
-#                             "predictive_mask_{}_{}/{}".format(frame_id, s, j),
-#                             outputs["predictive_mask"][("disp", s)][j, f_idx][None, ...],
-#                             self.step)
-                    
-#                 elif not self.opt.disable_automasking:
-#                     writer.add_image(
-#                         "automask_{}/{}".format(s, j),
-#                         outputs["identity_selection/{}".format(s)][j][None, ...], self.step)
+                    if self.opt.predictive_mask:
+                        for f_idx, frame_id in enumerate(self.opt.frame_ids[1:]):
+                            writer.add_image(
+                                "predictive_mask_{}_{}/{}".format(frame_id, s, j),
+                                outputs["predictive_mask"][("disp", s)][j, f_idx][None, ...],
+                                self.step)
+
+                    elif not self.opt.disable_automasking:
+                        writer.add_image(
+                            "automask_{}/{}".format(s, j),
+                            outputs["identity_selection/{}".format(s)][j][None, ...], self.step)
 
     def save_opts(self):
         """Save options to disk so we know what we ran this experiment with
