@@ -96,50 +96,19 @@ class Trainer:
             self.opt.frame_ids.append("s")
         if self.opt.model=="stereo":
             self.models["depth"] = cfnet(192,use_concat_volume=True)
+        elif self.opt.model=="distill":
+            self.models["depth_stereo"] = cfnet(192,use_concat_volume=True)
+            self.models["depth_stereo"].to(self.device)
+            self.parameters_to_train += list(self.models["depth_stereo"].parameters())
+
+            self.models["depth"] = networks.DepthGenerator()
         else:
-            self.models["depth"] = networks.DepthGenerator(self.opt)
+            self.models["depth"] = networks.DepthGenerator()
+        
         self.models["depth"].to(self.device)
         self.parameters_to_train += list(self.models["depth"].parameters())
 
-        if self.use_pose_net:
-            if self.opt.pose_model_type == "separate_resnet":
-                self.models["pose_encoder"] = networks.ResnetEncoder(
-                    self.opt.num_layers,
-                    self.opt.weights_init == "pretrained",
-                    num_input_images=self.num_pose_frames)
-
-                self.models["pose_encoder"].to(self.device)
-                self.parameters_to_train += list(self.models["pose_encoder"].parameters())
-
-                self.models["pose"] = networks.PoseDecoder(
-                    self.models["pose_encoder"].num_ch_enc,
-                    num_input_features=1,
-                    num_frames_to_predict_for=2)
-
-            elif self.opt.pose_model_type == "shared":
-                self.models["pose"] = networks.PoseDecoder(
-                    self.models["encoder"].num_ch_enc, self.num_pose_frames)
-
-            elif self.opt.pose_model_type == "posecnn":
-                self.models["pose"] = networks.PoseCNN(
-                    self.num_input_frames if self.opt.pose_model_input == "all" else 2)
-
-            self.models["pose"].to(self.device)
-            self.parameters_to_train += list(self.models["pose"].parameters())
-
-        if self.opt.predictive_mask:
-            assert self.opt.disable_automasking, \
-                "When using predictive_mask, please disable automasking with --disable_automasking"
-
-            # Our implementation of the predictive masking baseline has the the same architecture
-            # as our depth decoder. We predict a separate mask for each source frame.
-            self.models["predictive_mask"] = networks.DepthDecoder(
-                self.models["encoder"].num_ch_enc, self.opt.scales,
-                num_output_channels=(len(self.opt.frame_ids) - 1))
-            self.models["predictive_mask"].to(self.device)
-            self.parameters_to_train += list(self.models["predictive_mask"].parameters())
-
-        self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
+        self.model_optimizer = optim.AdamW(self.parameters_to_train, self.opt.learning_rate)
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(
             self.model_optimizer, self.opt.scheduler_step_size, 0.1)
 
@@ -288,16 +257,25 @@ class Trainer:
             if self.opt.model=="stereo":
                 outputs={}
                 outputs["stereo_disp"]= self.models["depth"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0])[:-1]
+            elif self.opt.model=="distill":
+                outputs = self.models["depth"](inputs["color_aug", 0, 0])
+                outputs["stereo_disp"]= self.models["depth_stereo"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0])[:-1]                
             else:
                 outputs = self.models["depth"](inputs["color_aug", 0, 0])
-        if self.opt.predictive_mask:
-            outputs["predictive_mask"] = self.models["predictive_mask"](features)
+
 
         if self.use_pose_net:
             outputs.update(self.predict_poses(inputs, features))
+        
         if self.opt.model=="stereo":
             self.generate_images_pred_stereo(inputs, outputs)
             losses = self.compute_losses_stereo(inputs, outputs)
+        elif self.opt.model=="distill":
+            self.generate_images_pred_stereo(inputs, outputs)
+            losses = self.compute_losses_stereo(inputs, outputs)
+            losses_distill=self.compute_disp_losses(outputs)
+            losses["loss"]+=(self.epoch/5)*losses_distill
+            losses["loss_distill"]=losses_distill
         else:
             self.generate_images_pred(inputs, outputs)
             losses = self.compute_losses(inputs, outputs)
@@ -551,6 +529,8 @@ class Trainer:
         scale=0
         st_output = outputs["stereo_disp"]
         weights = [0.5 * 0.5, 0.5 * 0.7, 0.5 * 1.0, 1 * 0.5, 1 * 0.7, 1 * 1.0, 2 * 0.5, 2 * 0.7, 2 * 1.0] 
+        loss_mask_min=torch.zeros_like(st_output[0].unsqueeze(1)).cuda()+5
+        depth_min=torch.zeros_like(st_output[0].unsqueeze(1)).cuda()+5
         for i in range(len(st_output)):
             loss = 0
             reprojection_losses = []
@@ -611,11 +591,18 @@ class Trainer:
             else:
                 combined = reprojection_loss
             
+            
             if combined.shape[1] == 1:
                 to_optimise = combined
             else:
                 to_optimise, idxs = torch.min(combined, dim=1)
-            
+            if self.opt.model=="distill" :
+
+
+                mask_idxs=loss_mask_min>to_optimise.unsqueeze(1)
+                depth_min[mask_idxs]=disp[mask_idxs]
+                loss_mask_min[mask_idxs]=to_optimise.unsqueeze(1)[mask_idxs]
+
             loss += to_optimise.mean()
             mean_disp = disp.mean(2, True).mean(3, True)
             norm_disp = disp / (mean_disp + 1e-7)
@@ -628,13 +615,42 @@ class Trainer:
                     import pdb;pdb.set_trace()
             
             loss += self.opt.disparity_smoothness * smooth_loss / (2 ** scale)
+            
             total_loss += weights[i]*loss
             losses["loss_stereo/{}".format(i)] = loss
+
         total_loss += loss
         total_loss /= len(st_output)#+1
+        if self.opt.model=="distill" :
+            outputs["stereo_disp_filter"]=depth_min
         losses["loss"] = total_loss
         return losses
     
+    def compute_disp_losses(self, inputs,mask_over_floor=None):
+        """Compute depth metrics, to allow monitoring during training
+
+        This isn't particularly accurate as it averages over the entire batch,
+        so is only used to give an indication of validation performance
+        """
+        losses = {}
+        loss_total=0
+        loss_smooth_l1=0
+        loss_SSIM=0
+        gt_disp=(inputs["stereo_disp_filter"]*5.4)/(0.54*720.36)
+        if self.opt.using_detach:
+            gt_disp=gt_disp.detach()
+
+        for i in self.opt.scales:
+            
+            disp_pred = inputs[("disp", i)]
+            gt_disp
+            h,w=gt_disp.shape[-2:]
+            disp_pred = F.interpolate(disp_pred, [h, w], mode="bilinear", align_corners=False)
+            
+            loss_smooth_l1+=F.smooth_l1_loss(disp_pred, gt_disp, size_average=True)
+            loss_SSIM+=self.ssim(disp_pred, gt_disp).mean()
+        loss_total+=loss_smooth_l1+loss_SSIM
+        return loss_total/len(self.opt.scales)
 
     def compute_depth_losses(self, inputs, outputs,mask_over_floor=None):
         """Compute depth metrics, to allow monitoring during training
@@ -654,7 +670,6 @@ class Trainer:
             h,w=depth_pred.shape[-2:]
             depth_gt= outputs*5.4
             crop=torch.zeros_like(depth_pred)
-
             depth_gt = F.interpolate(depth_gt, [h, w], mode="bilinear", align_corners=False)
             mask = (depth_gt > 1.0)*(depth_gt <= 80.0)
             
@@ -666,7 +681,7 @@ class Trainer:
         loss_total+=loss_log+loss_abs #+loss_SSIM
         losses["loss"] = loss_total/len(self.opt.scales)
         return losses
-
+    
     def log_time(self, batch_idx, duration, loss):
         """Print a logging statement to the terminal
         """
@@ -694,11 +709,10 @@ class Trainer:
 #                     "depht_gt/{}".format(j),
 #                     normalize_image(inputs["depth_gt"][j]), self.step)
 #             ################################################################################
-            if self.opt.model=="stereo":
+            if self.opt.model=="stereo" :
                 frame_id="s"
                 s=0
-#                 import pdb;pdb.set_trace()
-    # #             import pdb;pdb.set_trace()
+
                 for ii in range(len(outputs["stereo_disp"])):
                     try:
                         writer.add_image(
@@ -709,6 +723,27 @@ class Trainer:
                     writer.add_image(
                         "disp_{}_stereo_{}/{}".format(s,ii, j),
                         normalize_image(outputs["stereo_disp"][ii][j].unsqueeze(0)), self.step)
+#             ################################################################################
+            elif self.opt.model=="distill" :
+                frame_id="s"
+                s=0
+                writer.add_image(
+                        "disp_good/{}".format(j),
+                        normalize_image(outputs["stereo_disp_filter"][j]), self.step)
+                for ii in range(len(outputs["stereo_disp"])):
+                    try:
+                        writer.add_image(
+                                    "color_pred_stereo_{}_{}/{}".format(frame_id, s, j),
+                                    outputs[("color", "s", 0,"stereo",ii)][j].data, self.step)
+                    except:
+                        import pdb;pdb.set_trace()
+                    writer.add_image(
+                        "disp_{}_stereo_{}/{}".format(s,ii, j),
+                        normalize_image(outputs["stereo_disp"][ii][j].unsqueeze(0)), self.step)
+                for s in self.opt.scales:
+                    writer.add_image(
+                        "disp_{}/{}".format(s, j),
+                        normalize_image(outputs[("disp", s)][j]), self.step)
 #             ################################################################################
             else:
                 for s in self.opt.scales:

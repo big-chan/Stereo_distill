@@ -103,7 +103,7 @@ class MonodepthOptions:
         self.parser.add_argument("--num_epochs",
                                  type=int,
                                  help="number of epochs",
-                                 default=20)
+                                 default=50)
         self.parser.add_argument("--scheduler_step_size",
                                  type=int,
                                  help="step size of the scheduler",
@@ -171,6 +171,9 @@ class MonodepthOptions:
                                  default=1)
 
         # EVALUATION options
+        self.parser.add_argument("--using_detach",
+                                 help="if set evaluates in stereo mode",
+                                 action="store_true")
         self.parser.add_argument("--debug",
                                  help="if set evaluates in stereo mode",
                                  action="store_true")

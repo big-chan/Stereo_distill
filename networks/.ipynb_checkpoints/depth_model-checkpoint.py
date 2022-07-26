@@ -17,15 +17,9 @@ from .resnet_encoder import ResnetEncoder
 from .depth_decoder import DepthDecoder
 from models.cfnet import cfnet
 class DepthGenerator(nn.Module):
-    """Pytorch module for a resnet encoder
-    """
-    def __init__(self,opt):
+    def __init__(self):
         super(DepthGenerator, self).__init__()
-        
         self.encoder=ResnetEncoder(18, True)
-
         self.decoder= DepthDecoder(self.encoder.num_ch_enc, [0,1,2,3])
-        
     def forward(self, inputs):
-        
-        return self.decoder(self.encoder) #self.output
+        return self.decoder(self.encoder(inputs)) 
