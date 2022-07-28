@@ -14,7 +14,7 @@ import datasets
 import networks
 # from psmmodels import *
 from models.cfnet import cfnet
-
+from models.gwcnet import GwcNet
 cv2.setNumThreads(0)  # This speeds up evaluation 5x on our unix systems (OpenCV 3.3.1)
 
 
@@ -89,7 +89,7 @@ def evaluate(opt):
         dataloader = DataLoader(dataset, 8, shuffle=False, num_workers=opt.num_workers,
                                 pin_memory=True, drop_last=False)
         if opt.model=="stereo":
-            depth_decoder =  cfnet(192,use_concat_volume=True)
+            depth_decoder =  GwcNet(192,use_concat_volume=True)
         elif opt.model=="distill":
             depth_decoder =  networks.DepthGenerator()
             depth_decoder_stereo =  cfnet(192,use_concat_volume=True)
@@ -119,10 +119,10 @@ def evaluate(opt):
                     input_color = torch.cat((input_color, torch.flip(input_color, [3])), 0)
                 if opt.model=="stereo":
                     output = depth_decoder(data[("color", 0, 0)].cuda(),data[("color", "s", 0)].cuda())
-                    pred_disp=output[-2].unsqueeze(1).cpu()[:, 0].numpy() #.shape
+                    pred_disp=output[-1].unsqueeze(1).cpu()[:, 0].numpy() #.shape
                 elif opt.model=="distill":
                     output = depth_decoder_stereo(data[("color", 0, 0)].cuda(),data[("color", "s", 0)].cuda())
-                    pred_disp_stereo=output[-2].unsqueeze(1).cpu()[:, 0].numpy() #.shape
+                    pred_disp_stereo=output[-1].unsqueeze(1).cpu()[:, 0].numpy() #.shape
                     pred_disps_stereos.append(pred_disp_stereo)
                     output = depth_decoder(data[("color", 0, 0)].cuda())
                     pred_disp = output[("disp", 0)].cpu()[:, 0].numpy()

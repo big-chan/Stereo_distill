@@ -19,7 +19,7 @@ from models.cfnet import cfnet
 class DepthGenerator(nn.Module):
     def __init__(self):
         super(DepthGenerator, self).__init__()
-        self.encoder=ResnetEncoder(18, True)
+        self.encoder=ResnetEncoder(50, True)
         self.decoder= DepthDecoder(self.encoder.num_ch_enc, [0,1,2,3])
     def forward(self, inputs):
         return self.decoder(self.encoder(inputs)) 

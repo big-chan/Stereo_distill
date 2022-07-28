@@ -269,9 +269,9 @@ class hourglass(nn.Module):
 
         return conv6
 
-class cfnet(nn.Module):
+class dcnet(nn.Module):
     def __init__(self, maxdisp, use_concat_volume=False):
-        super(cfnet, self).__init__()
+        super(dcnet, self).__init__()
         self.maxdisp = maxdisp
         self.use_concat_volume = use_concat_volume
         self.v_scale_s1 = 1
@@ -594,75 +594,19 @@ class cfnet(nn.Module):
         cost1_s2 = self.confidence_classif1_s2(out2_s2).squeeze(1)
         cost1_s2_possibility = F.softmax(cost1_s2, dim=1)
         pred1_s2 = torch.sum(cost1_s2_possibility * disparity_samples_s2, dim=1, keepdim=True)
-        # import pdb;pdb.set_trace()
-        # pred1_v_s2 = disparity_variance_confidence(cost1_s2_possibility, disparity_samples_s2, pred1_s2)
-        # pred1_v_s2 = pred1_v_s2.sqrt()
+        pred2_s4 = F.upsample(pred2_s4 * 8, [left.size()[2], left.size()[3]], mode='bilinear', align_corners=True)
+        pred2_s4 = torch.squeeze(pred2_s4, 1)
 
-        if self.training:
-            cost0_4 = self.classif0(cost0_4)
-            cost1_4 = self.classif1(out1_4)
+        pred1_s3_up = F.upsample(pred1_s3 * 4, [left.size()[2], left.size()[3]], mode='bilinear',
+                                    align_corners=True)
+        pred1_s3_up = torch.squeeze(pred1_s3_up, 1)
 
-            cost0_4 = F.upsample(cost0_4, [self.maxdisp, left.size()[2], left.size()[3]], mode='trilinear', align_corners=True)
-            cost0_4 = torch.squeeze(cost0_4, 1)
-            pred0_4 = F.softmax(cost0_4, dim=1)
-            pred0_4 = disparity_regression(pred0_4, self.maxdisp)
-
-            cost1_4 = F.upsample(cost1_4, [self.maxdisp, left.size()[2], left.size()[3]], mode='trilinear', align_corners=True)
-            cost1_4 = torch.squeeze(cost1_4, 1)
-            pred1_4 = F.softmax(cost1_4, dim=1)
-            pred1_4 = disparity_regression(pred1_4, self.maxdisp)
-
-            pred2_s4 = F.upsample(pred2_s4 * 8, [left.size()[2], left.size()[3]], mode='bilinear', align_corners=True)
-            pred2_s4 = torch.squeeze(pred2_s4, 1)
-
-            cost0_s3 = self.confidence_classif0_s3(cost0_s3).squeeze(1)
-            cost0_s3 = F.softmax(cost0_s3, dim=1)
-            pred0_s3 = torch.sum(cost0_s3 * disparity_samples_s3, dim=1, keepdim=True)
-            pred0_s3 = F.upsample(pred0_s3 * 4, [left.size()[2], left.size()[3]], mode='bilinear',
-                                     align_corners=True)
-            pred0_s3 = torch.squeeze(pred0_s3, 1)
-
-            costmid_s3 = self.confidence_classifmid_s3(out1_s3).squeeze(1)
-            costmid_s3 = F.softmax(costmid_s3, dim=1)
-            predmid_s3 = torch.sum(costmid_s3 * disparity_samples_s3, dim=1, keepdim=True)
-            predmid_s3 = F.upsample(predmid_s3 * 4, [left.size()[2], left.size()[3]], mode='bilinear',
-                                     align_corners=True)
-            predmid_s3 = torch.squeeze(predmid_s3, 1)
-
-            pred1_s3_up = F.upsample(pred1_s3 * 4, [left.size()[2], left.size()[3]], mode='bilinear', align_corners=True)
-            pred1_s3_up = torch.squeeze(pred1_s3_up, 1)
-
-            cost0_s2 = self.confidence_classif0_s2(cost0_s2).squeeze(1)
-            cost0_s2 = F.softmax(cost0_s2, dim=1)
-            pred0_s2 = torch.sum(cost0_s2 * disparity_samples_s2, dim=1, keepdim=True)
-            pred0_s2 = F.upsample(pred0_s2 * 2, [left.size()[2], left.size()[3]], mode='bilinear', align_corners=True)
-            pred0_s2 = torch.squeeze(pred0_s2, 1)
-
-            costmid_s2 = self.confidence_classifmid_s2(out1_s2).squeeze(1)
-            costmid_s2 = F.softmax(costmid_s2, dim=1)
-            predmid_s2 = torch.sum(costmid_s2 * disparity_samples_s2, dim=1, keepdim=True)
-            predmid_s2 = F.upsample(predmid_s2 * 2, [left.size()[2], left.size()[3]], mode='bilinear',
-                                     align_corners=True)
-            predmid_s2 = torch.squeeze(predmid_s2, 1)
-
-            pred1_s2 = F.upsample(pred1_s2 * 2, [left.size()[2], left.size()[3]], mode='bilinear', align_corners=True)
-            pred1_s2 = torch.squeeze(pred1_s2, 1)
-
-            return [pred0_4, pred1_4, pred2_s4, pred0_s3, predmid_s3, pred1_s3_up, pred0_s2, predmid_s2, pred1_s2,cost1_s2 ]
-
-        else:
-            pred2_s4 = F.upsample(pred2_s4 * 8, [left.size()[2], left.size()[3]], mode='bilinear', align_corners=True)
-            pred2_s4 = torch.squeeze(pred2_s4, 1)
-
-            pred1_s3_up = F.upsample(pred1_s3 * 4, [left.size()[2], left.size()[3]], mode='bilinear',
-                                     align_corners=True)
-            pred1_s3_up = torch.squeeze(pred1_s3_up, 1)
-
-            pred1_s2 = F.upsample(pred1_s2 * 2, [left.size()[2], left.size()[3]], mode='bilinear', align_corners=True)
-            pred1_s2 = torch.squeeze(pred1_s2, 1)
+        pred1_s2 = F.upsample(pred1_s2 * 2, [left.size()[2], left.size()[3]], mode='bilinear', align_corners=True)
+        pred1_s2 = torch.squeeze(pred1_s2, 1)
 
 
-            return [pred2_s4,pred1_s3_up, pred1_s2,cost1_s2]
+        return [pred2_s4,pred1_s3_up, pred1_s2,cost1_s2]
+            
 
 
 def CFNet(d):

@@ -269,9 +269,9 @@ class hourglass(nn.Module):
 
         return conv6
 
-class cfnet(nn.Module):
+class dcnet(nn.Module):
     def __init__(self, maxdisp, use_concat_volume=False):
-        super(cfnet, self).__init__()
+        super(dcnet, self).__init__()
         self.maxdisp = maxdisp
         self.use_concat_volume = use_concat_volume
         self.v_scale_s1 = 1
@@ -594,7 +594,7 @@ class cfnet(nn.Module):
         cost1_s2 = self.confidence_classif1_s2(out2_s2).squeeze(1)
         cost1_s2_possibility = F.softmax(cost1_s2, dim=1)
         pred1_s2 = torch.sum(cost1_s2_possibility * disparity_samples_s2, dim=1, keepdim=True)
-        # import pdb;pdb.set_trace()
+#         import pdb;pdb.set_trace()
         # pred1_v_s2 = disparity_variance_confidence(cost1_s2_possibility, disparity_samples_s2, pred1_s2)
         # pred1_v_s2 = pred1_v_s2.sqrt()
 

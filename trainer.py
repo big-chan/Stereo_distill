@@ -28,6 +28,7 @@ import random
 import tarfile
 # from psmmodels import *
 from models.cfnet import cfnet
+from models.gwcnet import GwcNet
 def set_random_seed(seed):
     if seed >= 0:
         print("Set random seed@@@@@@@@@@@@@@@@@@@@")
@@ -230,7 +231,7 @@ class Trainer:
             if early_phase or late_phase:
                 self.log_time(batch_idx, duration, losses["loss"].cpu().data)
                 self.log("train", inputs, outputs, losses)
-                self.val()
+#                 self.val()
 
             self.step += 1
 
@@ -256,7 +257,8 @@ class Trainer:
             # Otherwise, we only feed the image with frame_id 0 through the depth encoder
             if self.opt.model=="stereo":
                 outputs={}
-                outputs["stereo_disp"]= self.models["depth"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0])[:-1]
+                outputs["stereo_disp"]= self.models["depth"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0]) #[:-1]
+#                 import pdb;pdb.set_trace()
             elif self.opt.model=="distill":
                 outputs = self.models["depth"](inputs["color_aug", 0, 0])
                 outputs["stereo_disp"]= self.models["depth_stereo"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0])[:-1]                
@@ -273,9 +275,21 @@ class Trainer:
         elif self.opt.model=="distill":
             self.generate_images_pred_stereo(inputs, outputs)
             losses = self.compute_losses_stereo(inputs, outputs)
-            losses_distill=self.compute_disp_losses(outputs)
-            losses["loss"]+=(self.epoch/5)*losses_distill
-            losses["loss_distill"]=losses_distill
+            self.generate_images_pred(inputs, outputs)
+            losses_mono = self.compute_losses(inputs, outputs)
+            losses["loss"]+=losses_mono["loss"]
+            mask=outputs["stereo_disp_filter_loss"]>outputs["mono_disp_filter_loss"]
+            depth=outputs["stereo_disp_filter"].clone()
+            depth[mask]=outputs["mono_disp_filter"][mask]
+            outputs["depth_label"]=depth
+            losses_distill_stereo=self.compute_depth_losses_stereo(outputs)
+            losses_distill_mono=self.compute_depth_losses_mono(outputs)
+
+#             losses_distill=self.compute_disp_losses(outputs)
+            if self.epoch>=1:
+                losses["loss"]+=(losses_distill_stereo["loss"]+losses_distill_mono["loss"])*0.1
+                losses["loss_distill_stereo"]=losses_distill_stereo["loss"]
+                losses["loss_distill_mono"]=losses_distill_mono["loss"]
         else:
             self.generate_images_pred(inputs, outputs)
             losses = self.compute_losses(inputs, outputs)
@@ -359,7 +373,7 @@ class Trainer:
         """Generate the warped (reprojected) color images for a minibatch.
         Generated images are saved into the `outputs` dictionary.
         """
-        for scale in self.opt.scales[2:]:
+        for scale in self.opt.scales:
             disp = outputs[("disp", scale)]
             if self.opt.v1_multiscale:
                 source_scale = scale
@@ -370,7 +384,6 @@ class Trainer:
             if self.opt.model=="stereo":
                 depth=disp
             else:
-
                 _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
 
             outputs[("depth", 0, scale)] = depth
@@ -429,8 +442,9 @@ class Trainer:
         """
         losses = {}
         total_loss = 0
-
-        for scale in self.opt.scales[2:]:
+        loss_mask_min=torch.zeros_like(outputs[("disp", 0)]).cuda()+5
+        depth_min=torch.zeros_like(outputs[("disp", 0)]).cuda()+5
+        for scale in self.opt.scales:
             loss = 0
             reprojection_losses = []
 
@@ -501,7 +515,13 @@ class Trainer:
             if not self.opt.disable_automasking:
 
                 outputs["identity_selection/{}".format(scale)] = ((idxs > identity_reprojection_loss.shape[1] - 1)).float()
+            if self.opt.model=="distill" :
 
+
+                mask_idxs=loss_mask_min>to_optimise.unsqueeze(1)
+                
+                depth_min[mask_idxs]=outputs[("depth", 0, scale)][mask_idxs]
+                loss_mask_min[mask_idxs]=to_optimise.unsqueeze(1)[mask_idxs]
             loss += to_optimise.mean()
             mean_disp = disp.mean(2, True).mean(3, True)
             norm_disp = disp / (mean_disp + 1e-7)
@@ -516,7 +536,9 @@ class Trainer:
             loss += self.opt.disparity_smoothness * smooth_loss / (2 ** scale)
             total_loss += loss
             losses["loss/{}".format(scale)] = loss
-
+        if self.opt.model=="distill" :
+            outputs["mono_disp_filter"]=depth_min
+            outputs["mono_disp_filter_loss"]=loss_mask_min
         total_loss /= self.num_scales
         losses["loss"] = total_loss
         return losses
@@ -528,9 +550,12 @@ class Trainer:
         total_loss = 0
         scale=0
         st_output = outputs["stereo_disp"]
-        weights = [0.5 * 0.5, 0.5 * 0.7, 0.5 * 1.0, 1 * 0.5, 1 * 0.7, 1 * 1.0, 2 * 0.5, 2 * 0.7, 2 * 1.0] 
-        loss_mask_min=torch.zeros_like(st_output[0].unsqueeze(1)).cuda()+5
-        depth_min=torch.zeros_like(st_output[0].unsqueeze(1)).cuda()+5
+#         weights = [0.5 * 0.5, 0.5 * 0.7, 0.5 * 1.0, 1 * 0.5, 1 * 0.7, 1 * 1.0, 2 * 0.5, 2 * 0.7, 2 * 1.0] 
+        try:
+            loss_mask_min=torch.zeros_like(st_output[0].unsqueeze(1)).cuda()+5
+            depth_min=torch.zeros_like(st_output[0].unsqueeze(1)).cuda()+5
+        except:
+            import pdb;pdb.set_trace()
         for i in range(len(st_output)):
             loss = 0
             reprojection_losses = []
@@ -600,7 +625,7 @@ class Trainer:
 
 
                 mask_idxs=loss_mask_min>to_optimise.unsqueeze(1)
-                depth_min[mask_idxs]=disp[mask_idxs]
+                depth_min[mask_idxs]=outputs[("depth", 0, scale,"stereo",i)][mask_idxs]
                 loss_mask_min[mask_idxs]=to_optimise.unsqueeze(1)[mask_idxs]
 
             loss += to_optimise.mean()
@@ -616,13 +641,14 @@ class Trainer:
             
             loss += self.opt.disparity_smoothness * smooth_loss / (2 ** scale)
             
-            total_loss += weights[i]*loss
+            total_loss += loss
             losses["loss_stereo/{}".format(i)] = loss
 
         total_loss += loss
         total_loss /= len(st_output)#+1
         if self.opt.model=="distill" :
             outputs["stereo_disp_filter"]=depth_min
+            outputs["stereo_disp_filter_loss"]=loss_mask_min
         losses["loss"] = total_loss
         return losses
     
@@ -647,12 +673,13 @@ class Trainer:
             h,w=gt_disp.shape[-2:]
             disp_pred = F.interpolate(disp_pred, [h, w], mode="bilinear", align_corners=False)
             
-            loss_smooth_l1+=F.smooth_l1_loss(disp_pred, gt_disp, size_average=True)
+            loss_log+=self.silog_criterion(depth_gt,depth_pred)*0.1
+#             loss_smooth_l1+=F.smooth_l1_loss(disp_pred, gt_disp, size_average=True)
             loss_SSIM+=self.ssim(disp_pred, gt_disp).mean()
         loss_total+=loss_smooth_l1+loss_SSIM
         return loss_total/len(self.opt.scales)
 
-    def compute_depth_losses(self, inputs, outputs,mask_over_floor=None):
+    def compute_depth_losses_stereo(self, inputs,mask_over_floor=None):
         """Compute depth metrics, to allow monitoring during training
 
         This isn't particularly accurate as it averages over the entire batch,
@@ -663,21 +690,32 @@ class Trainer:
         loss_log=0
         loss_abs=0
         loss_SSIM=0
-        
+        gt_depth=inputs["depth_label"].detach() 
+        for i in range(len(inputs["stereo_disp"])):
+            
+            depth_pred = inputs[("depth", 0, 0,"stereo",i)]
+            loss_log+=self.silog_criterion(gt_depth,depth_pred)#*0.1
+            loss_abs+=self.abs_criterion(gt_depth,depth_pred)
+        loss_total+=loss_log+loss_abs #+loss_SSIM
+        losses["loss"] = loss_total/len(self.opt.scales)
+        return losses
+    def compute_depth_losses_mono(self, inputs,mask_over_floor=None):
+        """Compute depth metrics, to allow monitoring during training
+
+        This isn't particularly accurate as it averages over the entire batch,
+        so is only used to give an indication of validation performance
+        """
+        losses = {}
+        loss_total=0
+        loss_log=0
+        loss_abs=0
+        loss_SSIM=0
+        gt_depth=inputs["depth_label"].detach()
         for i in self.opt.scales:
             
             depth_pred = inputs[("depth", 0, i)]
-            h,w=depth_pred.shape[-2:]
-            depth_gt= outputs*5.4
-            crop=torch.zeros_like(depth_pred)
-            depth_gt = F.interpolate(depth_gt, [h, w], mode="bilinear", align_corners=False)
-            mask = (depth_gt > 1.0)*(depth_gt <= 80.0)
-            
-            depth_gt = depth_gt[mask]
-            depth_pred = depth_pred[mask]
-            loss_log+=self.silog_criterion(depth_gt,depth_pred*5.4)*0.1
-            loss_abs+=self.abs_criterion(depth_gt,depth_pred*5.4)
-            inputs["mask/{}".format(i)]=mask
+            loss_log+=self.silog_criterion(gt_depth,depth_pred)#*0.1
+            loss_abs+=self.abs_criterion(gt_depth,depth_pred)
         loss_total+=loss_log+loss_abs #+loss_SSIM
         losses["loss"] = loss_total/len(self.opt.scales)
         return losses
@@ -727,9 +765,16 @@ class Trainer:
             elif self.opt.model=="distill" :
                 frame_id="s"
                 s=0
+#                 import pdb;pdb.set_trace()
+                writer.add_image(
+                        "disp_good_stereo/{}".format(j),
+                        normalize_image(outputs["stereo_disp_filter"][j]), self.step)
+                writer.add_image(
+                        "disp_good_mono/{}".format(j),
+                        normalize_image(outputs["mono_disp_filter"][j]), self.step)
                 writer.add_image(
                         "disp_good/{}".format(j),
-                        normalize_image(outputs["stereo_disp_filter"][j]), self.step)
+                        normalize_image(outputs["depth_label"][j]), self.step)
                 for ii in range(len(outputs["stereo_disp"])):
                     try:
                         writer.add_image(
@@ -741,6 +786,14 @@ class Trainer:
                         "disp_{}_stereo_{}/{}".format(s,ii, j),
                         normalize_image(outputs["stereo_disp"][ii][j].unsqueeze(0)), self.step)
                 for s in self.opt.scales:
+                    for frame_id in self.opt.frame_ids:
+                        writer.add_image(
+                            "color_{}_{}/{}".format(frame_id, s, j),
+                            inputs[("color", frame_id, s)][j].data, self.step)
+                        if s == 0 and frame_id != 0:
+                            writer.add_image(
+                                "color_pred_{}_{}/{}".format(frame_id, s, j),
+                                outputs[("color", frame_id, s)][j].data, self.step)
                     writer.add_image(
                         "disp_{}/{}".format(s, j),
                         normalize_image(outputs[("disp", s)][j]), self.step)
