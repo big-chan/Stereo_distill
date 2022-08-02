@@ -20,7 +20,7 @@ import json
 from utils import *
 from kitti_utils import *
 from layers import *
-import cv2
+
 import datasets
 import networks
 from IPython import embed
@@ -29,7 +29,6 @@ import tarfile
 # from psmmodels import *
 from models.cfnet import cfnet
 from models.gwcnet import GwcNet
-from pwcnet import Network as pwcnet
 def set_random_seed(seed):
     if seed >= 0:
         print("Set random seed@@@@@@@@@@@@@@@@@@@@")
@@ -97,10 +96,9 @@ class Trainer:
         if self.opt.use_stereo:
             self.opt.frame_ids.append("s")
         if self.opt.model=="stereo":
-#             self.models["depth"] = GwcNet(192,use_concat_volume=True)
-            self.models["depth"] = pwcnet()
+            self.models["depth"] = cfnet(192,use_concat_volume=True)
         elif self.opt.model=="distill":
-            self.models["depth_stereo"] =  pwcnet() #GwcNet(192,use_concat_volume=True)
+            self.models["depth_stereo"] = GwcNet(192,use_concat_volume=True)
             self.models["depth_stereo"].to(self.device)
             self.parameters_to_train += list(self.models["depth_stereo"].parameters())
 
@@ -114,13 +112,7 @@ class Trainer:
         self.model_optimizer = optim.AdamW(self.parameters_to_train, self.opt.learning_rate)
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(
             self.model_optimizer, self.opt.scheduler_step_size, 0.1)
-        
-#         path = "sceneflow_pretraining.ckpt"
-#         model_dict = self.models["depth"].state_dict()["model"]
-#         pretrained_dict = torch.load(path)
-#         pretrained_dict = {k.replace("module.",""): v for k, v in pretrained_dict.items() if k.replace("module.","") in model_dict}
-#         model_dict.update(pretrained_dict)
-#         self.models["depth"].load_state_dict(model_dict)
+
         if self.opt.load_weights_folder is not None:
             self.load_model()
 
@@ -170,10 +162,10 @@ class Trainer:
             h = self.opt.height // (2 ** scale)
             w = self.opt.width // (2 ** scale)
 
-            self.backproject_depth[scale] = BackprojectDepth(self.opt.batch_size*2 if self.opt.model=="distill" else self.opt.batch_size, h, w)
+            self.backproject_depth[scale] = BackprojectDepth(self.opt.batch_size, h, w)
             self.backproject_depth[scale].to(self.device)
 
-            self.project_3d[scale] = Project3D(self.opt.batch_size*2 if self.opt.model=="distill" else self.opt.batch_size, h, w)
+            self.project_3d[scale] = Project3D(self.opt.batch_size, h, w)
             self.project_3d[scale].to(self.device)
             
         self.backproject_depth[-1] = BackprojectDepth(self.opt.batch_size, 375, 1242)
@@ -223,7 +215,7 @@ class Trainer:
         for batch_idx, inputs in enumerate(self.train_loader):
 
             before_op_time = time.time()
-            self.batch_idx=batch_idx
+
             outputs, losses = self.process_batch(inputs)
 
             self.model_optimizer.zero_grad()
@@ -242,52 +234,7 @@ class Trainer:
 #                 self.val()
 
             self.step += 1
-    def apply_disparity(self, img, disp):
-        batch_size, _, height, width = img.size()
 
-        # Original coordinates of pixels
-        x_base = torch.linspace(0, 1, width).repeat(batch_size,
-                    height, 1).type_as(img)
-        y_base = torch.linspace(0, 1, height).repeat(batch_size,
-                    width, 1).transpose(1, 2).type_as(img)
-
-        # Apply shift in X direction
-        x_shifts = disp[:, 0, :, :]  # Disparity is passed in NCHW format with 1 channel
-        flow_field = torch.stack((x_base + x_shifts, y_base), dim=3)
-        
-        # In grid_sample coordinates are assumed to be between -1 and 1
-        output = F.grid_sample(img, 2*flow_field - 1, mode='bilinear',
-                               padding_mode='zeros')
-        
-        return output,x_base + x_shifts
-    def occlusion_left(self,disp_left,disp_right):
-        disp_left = disp_left.unsqueeze(1) /640
-        disp_right = disp_right.unsqueeze(1) /640
-        disp_right_warped, flow_field_r = self.apply_disparity(-disp_right, -disp_left) #right->left 이므로 disp_left에 - 부호를 붙여줘야함
-        
-        occ_map_left = (torch.abs(disp_left + disp_right_warped) >= (0.1*(torch.abs(disp_left) + torch.abs(disp_right_warped))+0.5)).type(torch.LongTensor).cuda()
-        
-        occ_map_left[(flow_field_r.unsqueeze(1)<0)]=1
-        occ_map_left[(flow_field_r.unsqueeze(1)>1)]=1
-        disp_left = disp_left /(1/640)
-        disp_right = disp_right /(1/640)
-        
-        return occ_map_left
-    def occlusion_right(self,disp_left,disp_right):
-        disp_left = disp_left.unsqueeze(1) /640
-        disp_right = disp_right.unsqueeze(1) /640
-        disp_left_warped, flow_field_l = self.apply_disparity(-disp_left, disp_right) #right->left 이므로 disp_left에 - 부호를 붙여줘야함
-        
-        occ_map_right = (torch.abs(disp_right + disp_left_warped) >= (0.1*(torch.abs(disp_right) + torch.abs(disp_left_warped))+0.5)).type(torch.LongTensor).cuda()
-
-        occ_map_right[(flow_field_l.unsqueeze(1)<0)]=1
-        occ_map_right[(flow_field_l.unsqueeze(1)>1)]=1
-        
-        disp_left = disp_left /(1/640)
-        disp_right = disp_right /(1/640)
-        
-        return occ_map_right
-    
     def process_batch(self, inputs):
         """Pass a minibatch through the network and generate images and losses
         """
@@ -307,133 +254,51 @@ class Trainer:
 
             outputs = self.models["depth"](features[0])
         else:
-            f_u=640/5.4
             # Otherwise, we only feed the image with frame_id 0 through the depth encoder
             if self.opt.model=="stereo":
-                ######################################
-                left_color=inputs["color_aug", 0, 0].clone()
-                right_color=inputs["color_aug", "s", 0].clone()
-                ############################################################
-                inputs["color_aug", 0, 0]=torch.cat((left_color,right_color),dim=0)
-                inputs["color_aug", "s", 0]=torch.cat((right_color,left_color),dim=0)
-                ##################################
-                left_color=inputs["color", 0, 0].clone()
-                right_color=inputs["color", "s", 0].clone()
-                inputs["color", 0, 0]=torch.cat((left_color,right_color),dim=0)
-                inputs["color", "s", 0]=torch.cat((right_color,left_color),dim=0)
-                right_T=inputs["stereo_T"].clone()
-                right_T[:,0,3]*=-1
-                inputs["stereo_T"]=torch.cat((inputs["stereo_T"],right_T),dim=0)
-                inputs[("inv_K",0)]=torch.cat((inputs[("inv_K",0)],inputs[("inv_K",0)]),dim=0)
-                inputs[("K",0)]=torch.cat((inputs[("K",0)],inputs[("K",0)]),dim=0)
-                ######################################
                 outputs={}
-                outputs["stereo_disp"]= [self.models["depth"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0])]#[:-1]
+                outputs["stereo_disp"]= self.models["depth"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0]) #[:-1]
 #                 import pdb;pdb.set_trace()
-                outputs["occlusion_left"],outputs["occlusion_right"]=self.make_occ_map(outputs["stereo_disp"][-1][:self.opt.batch_size],outputs["stereo_disp"][-1][self.opt.batch_size:]) #.cuda()
-                
-                outputs["occlusion"]=torch.cat((outputs["occlusion_left"].cuda(),outputs["occlusion_right"].cuda()),dim=0)
-
-
             elif self.opt.model=="distill":
-                left_color=inputs["color_aug", 0, 0].clone()
-                right_color=inputs["color_aug", "s", 0].clone()
-                ############################################################
-                inputs["color_aug", 0, 0]=torch.cat((left_color,right_color),dim=0)
-                inputs["color_aug", "s", 0]=torch.cat((right_color,left_color),dim=0)
-                ##################################
-                left_color=inputs["color", 0, 0].clone()
-                right_color=inputs["color", "s", 0].clone()
-                inputs["color", 0, 0]=torch.cat((left_color,right_color),dim=0)
-                inputs["color", "s", 0]=torch.cat((right_color,left_color),dim=0)
-                right_T=inputs["stereo_T"].clone()
-                right_T[:,0,3]*=-1
-                inputs["stereo_T"]=torch.cat((inputs["stereo_T"],right_T),dim=0)
-                inputs[("inv_K",0)]=torch.cat((inputs[("inv_K",0)],inputs[("inv_K",0)]),dim=0)
-                inputs[("K",0)]=torch.cat((inputs[("K",0)],inputs[("K",0)]),dim=0)
                 outputs = self.models["depth"](inputs["color_aug", 0, 0])
-                
-                outputs["stereo_disp"]= [self.models["depth_stereo"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0])] #[:-1]
-                outputs["occlusion_left"],outputs["occlusion_right"]=self.make_occ_map(outputs["stereo_disp"][-1][:self.opt.batch_size],outputs["stereo_disp"][-1][self.opt.batch_size:]) #.cuda()
-                
-                outputs["occlusion"]=torch.cat((outputs["occlusion_left"].cuda(),outputs["occlusion_right"].cuda()),dim=0)
+                outputs["stereo_disp"]= self.models["depth_stereo"](inputs["color_aug", 0, 0], inputs["color_aug", "s", 0])[:-1]                
             else:
                 outputs = self.models["depth"](inputs["color_aug", 0, 0])
+
 
         if self.use_pose_net:
             outputs.update(self.predict_poses(inputs, features))
         
         if self.opt.model=="stereo":
-            self.generate_images_pred_stereo_mono1(inputs, outputs)
+            self.generate_images_pred_stereo(inputs, outputs)
             losses = self.compute_losses_stereo(inputs, outputs)
         elif self.opt.model=="distill":
-            self.generate_images_pred_stereo_mono1(inputs, outputs)
+            self.generate_images_pred_stereo(inputs, outputs)
             losses = self.compute_losses_stereo(inputs, outputs)
-            loss_distills=0
-            for i in self.opt.scales:
-                pred_disp_mono=outputs[("disp",i)]
-                pred_disp_mono=F.interpolate(
-                        pred_disp_mono, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
-                loss_distill=torch.log(1+torch.abs(pred_disp_mono-outputs["stereo_disp"][-1].detach()))*(1-outputs["occlusion"])
-                loss_distills+=loss_distill.sum()/(1-outputs["occlusion"]).sum()
-#                 loss_distills+=loss_distill.mean()
-#                 import pdb;pdb.set_trace()
-            losses["loss"]+=loss_distills
-            losses["loss_distill_mono"]=loss_distills
-#             self.generate_images_pred(inputs, outputs)
-#             losses_mono = self.compute_losses(inputs, outputs)
-            
-#             losses["loss"]+=losses_mono["loss"]
-#             mask=outputs["stereo_disp_filter_loss"]>outputs["mono_disp_filter_loss"]
-#             depth=outputs["stereo_disp_filter"].clone()
-#             depth[mask]=outputs["mono_disp_filter"][mask]
-#             outputs["depth_label"]=depth
-#             outputs["depth_label_mask"]=mask
-#             losses_distill_stereo=self.compute_depth_losses_stereo(outputs)
-#             losses_distill_mono=self.compute_depth_losses_mono(outputs)
-    
-# #             losses_distill=self.compute_disp_losses(outputs)
-#             if self.epoch>=1:
-# #                 import pdb;pdb.set_trace()
-                
-#                 losses["loss"]+=(losses_distill_stereo["loss"]+losses_distill_mono["loss"])*0.1
-#                 losses["loss_distill_stereo"]=losses_distill_stereo["loss"]
-#                 losses["loss_distill_mono"]=losses_distill_mono["loss"]
+            self.generate_images_pred(inputs, outputs)
+            losses_mono = self.compute_losses(inputs, outputs)
+            losses["loss"]+=losses_mono["loss"]
+            mask=outputs["stereo_disp_filter_loss"]>outputs["mono_disp_filter_loss"]
+            depth=outputs["stereo_disp_filter"].clone()
+            depth[mask]=outputs["mono_disp_filter"][mask]
+            outputs["depth_label"]=depth
+            losses_distill_stereo=self.compute_depth_losses_stereo(outputs)
+            losses_distill_mono=self.compute_depth_losses_mono(outputs)
+
+#             losses_distill=self.compute_disp_losses(outputs)
+            if self.epoch>=1:
+                import pdb;pdb.set_trace()
+                losses["loss"]+=(losses_distill_stereo["loss"]+losses_distill_mono["loss"])*0.1
+                losses["loss_distill_stereo"]=losses_distill_stereo["loss"]
+                losses["loss_distill_mono"]=losses_distill_mono["loss"]
         else:
             self.generate_images_pred(inputs, outputs)
             losses = self.compute_losses(inputs, outputs)
         
         return outputs, losses
 
-    def make_warp(self,img,depth,stereo_T,inv_K,K):
-        T = stereo_T
-        source_scale=0
-        cam_points = self.backproject_depth[source_scale](depth, inv_K)
-        pix_coords = self.project_3d[source_scale](cam_points, K, T)
-
-        warped_img = F.grid_sample(img,pix_coords,padding_mode="border")
-        return warped_img
     
-    def make_occ_map(self, disp_left, disp_right):
-        
-        depth_left=0.54*0.58*640/(640*disp_left)
-        depth_right=0.54*0.58*640/(640*disp_right)
 
-        disp_right_warped, flow_field_r = self.apply_disparity(-depth_left, -disp_left) 
-        disp_left_warped, flow_field_l = self.apply_disparity(-depth_right, disp_right) 
-
-        occ_map_left = (torch.abs(depth_left + disp_right_warped) >= 2.0).type(torch.LongTensor).cuda()
-        occ_map_right = (torch.abs(depth_right + disp_left_warped) >= 2.0).type(torch.LongTensor).cuda()
-
-        occ_map_left[(flow_field_r<0).unsqueeze(1)]=1
-        occ_map_left[(flow_field_r>1).unsqueeze(1)]=1
-        
-        
-        occ_map_right[(flow_field_l<0).unsqueeze(1)]=1
-        occ_map_right[(flow_field_l>1).unsqueeze(1)]=1
-        ######
-        return occ_map_left ,occ_map_right
-    
     def val(self):
         """Validate the model on a single minibatch
         """
@@ -452,31 +317,6 @@ class Trainer:
             del inputs, outputs, losses
 
         self.set_train()
-        
-    def generate_images_pred_stereo_mono1(self, inputs, outputs):
-        """Generate the warped (reprojected) color images for a minibatch.
-        Generated images are saved into the `outputs` dictionary.
-        """
-        st_output = outputs["stereo_disp"]
-        scale=0
-        for i in range(len(st_output)):
-            disp = st_output[i] #.unsqueeze(1)
-            if self.opt.v1_multiscale:
-                source_scale = scale
-            else:
-                try:
-                    disp = F.interpolate(
-                        disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
-                except:
-                    import pdb;pdb.set_trace()
-                source_scale = 0
-            _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
-            outputs[("depth", 0, scale,"stereo",i)] = depth
-            for ii, frame_id in enumerate(self.opt.frame_ids[1:]):
-                T = inputs["stereo_T"]                
-                T_=T[:,0,3].clone().repeat((640,192,1,1)).permute((3,2,1,0))*10
-                outputs[("color", frame_id, scale,"stereo",i)],_=self.apply_disparity(inputs[("color", frame_id, source_scale)], T_*disp)
-                
     def generate_images_pred_stereo(self, inputs, outputs):
         """Generate the warped (reprojected) color images for a minibatch.
         Generated images are saved into the `outputs` dictionary.
@@ -484,8 +324,7 @@ class Trainer:
         st_output = outputs["stereo_disp"]
         scale=0
         for i in range(len(st_output)):
-#             disp = st_output[i].uqnsqueeze(1)
-            disp = st_output[i] #.unsqueeze(1)
+            disp = st_output[i].unsqueeze(1)
             if self.opt.v1_multiscale:
                 source_scale = scale
             else:
@@ -495,8 +334,8 @@ class Trainer:
                 except:
                     import pdb;pdb.set_trace()
                 source_scale = 0
-            _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
-#             depth=0.54*720.36/disp/5.4
+
+            depth=0.54*720.36/disp/5.4
 
             outputs[("depth", 0, scale,"stereo",i)] = depth
 
@@ -690,15 +529,8 @@ class Trainer:
             try:
                 if self.opt.model=="stereo":
                     smooth_loss = get_smooth_loss(norm_disp, target)
-                elif self.opt.model=="distill":
-                    if scale!=0:
-                        smooth_loss = get_smooth_loss(norm_disp, torch.cat((color,inputs[("color", "s", scale)]),dim=0))
-                    else:
-                        smooth_loss = get_smooth_loss(norm_disp,color)
                 else:
-                    smooth_loss = get_smooth_loss(norm_disp,color)
-#                     import pdb;pdb.set_trace()
-                    
+                    smooth_loss = get_smooth_loss(norm_disp, color)
             except:
                     import pdb;pdb.set_trace()
             
@@ -719,12 +551,10 @@ class Trainer:
         total_loss = 0
         scale=0
         st_output = outputs["stereo_disp"]
-
+#         weights = [0.5 * 0.5, 0.5 * 0.7, 0.5 * 1.0, 1 * 0.5, 1 * 0.7, 1 * 1.0, 2 * 0.5, 2 * 0.7, 2 * 1.0] 
         try:
-#             loss_mask_min=torch.zeros_like(st_output[0].unsqueeze(1)).cuda()+5
-#             depth_min=torch.zeros_like(st_output[0].unsqueeze(1)).cuda()+5
-            loss_mask_min=torch.zeros_like(st_output[0]).cuda()+5
-            depth_min=torch.zeros_like(st_output[0]).cuda()+5
+            loss_mask_min=torch.zeros_like(st_output[0].unsqueeze(1)).cuda()+5
+            depth_min=torch.zeros_like(st_output[0].unsqueeze(1)).cuda()+5
         except:
             import pdb;pdb.set_trace()
         for i in range(len(st_output)):
@@ -733,8 +563,7 @@ class Trainer:
 
             source_scale = 0
 
-#             disp = st_output[i].unsqueeze(1) #outputs[("disp", scale)]
-            disp = st_output[i] #.unsqueeze(1) #outputs[("disp", scale)]
+            disp = st_output[i].unsqueeze(1) #outputs[("disp", scale)]
             color = inputs[("color", 0, scale)]
             target = inputs[("color", 0, source_scale)]
             
@@ -799,9 +628,7 @@ class Trainer:
                 mask_idxs=loss_mask_min>to_optimise.unsqueeze(1)
                 depth_min[mask_idxs]=outputs[("depth", 0, scale,"stereo",i)][mask_idxs]
                 loss_mask_min[mask_idxs]=to_optimise.unsqueeze(1)[mask_idxs]
-            
 
-            to_optimise=to_optimise*(1- outputs["occlusion"][:,0,:,:])
             loss += to_optimise.mean()
             mean_disp = disp.mean(2, True).mean(3, True)
             norm_disp = disp / (mean_disp + 1e-7)
@@ -870,7 +697,6 @@ class Trainer:
             depth_pred = inputs[("depth", 0, 0,"stereo",i)]
             loss_log+=self.silog_criterion(gt_depth,depth_pred)#*0.1
             loss_abs+=self.abs_criterion(gt_depth,depth_pred)
-#             loss_SSIM+=self.ssim(disp_pred, gt_disp).mean()
         loss_total+=loss_log+loss_abs #+loss_SSIM
         losses["loss"] = loss_total/len(self.opt.scales)
         return losses
@@ -889,10 +715,8 @@ class Trainer:
         for i in self.opt.scales:
             
             depth_pred = inputs[("depth", 0, i)]
-            mask=(1-inputs["occlusion"]).type(torch.BoolTensor).cuda()
-            
-            loss_log+=self.silog_criterion(gt_depth[mask],depth_pred[mask])#*0.1
-            loss_abs+=self.abs_criterion(gt_depth[mask],depth_pred[mask])
+            loss_log+=self.silog_criterion(gt_depth,depth_pred)#*0.1
+            loss_abs+=self.abs_criterion(gt_depth,depth_pred)
         loss_total+=loss_log+loss_abs #+loss_SSIM
         losses["loss"] = loss_total/len(self.opt.scales)
         return losses
@@ -927,15 +751,7 @@ class Trainer:
             if self.opt.model=="stereo" :
                 frame_id="s"
                 s=0
-                writer.add_image(
-                            "occlusion/{}".format(j),
-                            outputs["occlusion"][j][0][None, ...], self.step)
-                writer.add_image(
-                            "occlusion_left/{}".format(j),
-                            outputs["occlusion"][j][0][None, ...], self.step)
-                writer.add_image(
-                            "occlusion_right/{}".format(j),
-                            outputs["occlusion_right"][j][0][None, ...], self.step)
+
                 for ii in range(len(outputs["stereo_disp"])):
                     try:
                         writer.add_image(
@@ -943,62 +759,42 @@ class Trainer:
                                     outputs[("color", "s", 0,"stereo",ii)][j].data, self.step)
                     except:
                         import pdb;pdb.set_trace()
-#                     writer.add_image(
-#                         "disp_{}_stereo_{}/{}".format(s,ii, j),
-#                         normalize_image(outputs["stereo_disp"][ii][j].unsqueeze(0)), self.step)
                     writer.add_image(
                         "disp_{}_stereo_{}/{}".format(s,ii, j),
-                        normalize_image(outputs["stereo_disp"][ii][j]), self.step)
-                    writer.add_image(
-                        "disp_{}_stereo_{}_right/{}".format(s,ii, j),
-                        normalize_image(outputs["stereo_disp"][ii][j+ self.opt.batch_size]), self.step)
+                        normalize_image(outputs["stereo_disp"][ii][j].unsqueeze(0)), self.step)
 #             ################################################################################
             elif self.opt.model=="distill" :
                 frame_id="s"
                 s=0
 #                 import pdb;pdb.set_trace()
                 writer.add_image(
-                            "occlusion_left/{}".format(j),
-                            outputs["occlusion"][j][0][None, ...], self.step)
+                        "disp_good_stereo/{}".format(j),
+                        normalize_image(outputs["stereo_disp_filter"][j]), self.step)
                 writer.add_image(
-                            "occlusion_right/{}".format(j),
-                            outputs["occlusion_right"][j][0][None, ...], self.step)
-#                 writer.add_image(
-#                         "disp_good_stereo/{}".format(j),
-#                         normalize_image(outputs["stereo_disp_filter"][j]), self.step)
-#                 writer.add_image(
-#                         "disp_good_mono/{}".format(j),
-#                         normalize_image(outputs["mono_disp_filter"][j]), self.step)
-#                 writer.add_image(
-#                         "disp_good/{}".format(j),
-#                         normalize_image(outputs["depth_label"][j]), self.step)
-                
+                        "disp_good_mono/{}".format(j),
+                        normalize_image(outputs["mono_disp_filter"][j]), self.step)
+                writer.add_image(
+                        "disp_good/{}".format(j),
+                        normalize_image(outputs["depth_label"][j]), self.step)
                 for ii in range(len(outputs["stereo_disp"])):
                     try:
                         writer.add_image(
                                     "color_pred_stereo_{}_{}/{}".format(frame_id, s, j),
                                     outputs[("color", "s", 0,"stereo",ii)][j].data, self.step)
-                        
                     except:
                         import pdb;pdb.set_trace()
-#                     writer.add_image(
-#                         "disp_{}_stereo_{}/{}".format(s,ii, j),
-#                         normalize_image(outputs["stereo_disp"][ii][j].unsqueeze(0)), self.step)
                     writer.add_image(
                         "disp_{}_stereo_{}/{}".format(s,ii, j),
-                        normalize_image(outputs["stereo_disp"][ii][j]), self.step)
-                    writer.add_image(
-                        "disp_{}_stereo_{}_right/{}".format(s,ii, j),
-                        normalize_image(outputs["stereo_disp"][ii][j+ self.opt.batch_size]), self.step)
+                        normalize_image(outputs["stereo_disp"][ii][j].unsqueeze(0)), self.step)
                 for s in self.opt.scales:
-#                     for frame_id in self.opt.frame_ids:
-#                         writer.add_image(
-#                             "color_{}_{}/{}".format(frame_id, s, j),
-#                             inputs[("color", frame_id, s)][j].data, self.step)
-#                         if s == 0 and frame_id != 0:
-#                             writer.add_image(
-#                                 "color_pred_{}_{}/{}".format(frame_id, s, j),
-#                                 outputs[("color", frame_id, s)][j].data, self.step)
+                    for frame_id in self.opt.frame_ids:
+                        writer.add_image(
+                            "color_{}_{}/{}".format(frame_id, s, j),
+                            inputs[("color", frame_id, s)][j].data, self.step)
+                        if s == 0 and frame_id != 0:
+                            writer.add_image(
+                                "color_pred_{}_{}/{}".format(frame_id, s, j),
+                                outputs[("color", frame_id, s)][j].data, self.step)
                     writer.add_image(
                         "disp_{}/{}".format(s, j),
                         normalize_image(outputs[("disp", s)][j]), self.step)
