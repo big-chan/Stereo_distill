@@ -106,7 +106,48 @@ class KITTIRAWDataset(KITTIDataset):
             depth_gt = np.fliplr(depth_gt)
 
         return depth_gt
+    
+class KITTI2015Dataset(KITTIDataset):
+    """KITTI dataset which loads the original velodyne depth maps for ground truth
+    """
+    def __init__(self, *args, **kwargs):
+        super(KITTI2015Dataset, self).__init__(*args, **kwargs)
 
+    def get_image_path(self, folder, frame_index, side):
+        f_str = "{:06d}_10{}".format(frame_index, self.img_ext)
+        image_path = os.path.join(
+            self.data_path,  "image_{}".format(self.side_map[side]), f_str)
+        return image_path
+    def get_depth_png(self, folder, frame_index, side, do_flip):
+        f_str = "{:010d}{}".format(frame_index, self.img_ext)
+        velo_filename = os.path.join(
+            self.data_path, folder, "proj_depth/groundtruth/image_0{}".format(self.side_map[side]), f_str)
+
+        depth_gt=pil.open(velo_filename)
+        depth_gt = np.asarray(depth_gt, dtype=np.float32)
+        if do_flip:
+            depth_gt = np.fliplr(depth_gt)
+
+        return depth_gt/256
+    
+    def get_depth(self, folder, frame_index, side, do_flip):
+        calib_path = os.path.join(self.data_path, folder.split("/")[0])
+
+        velo_filename = os.path.join(
+            folder,
+            "{:05d}.npy".format(int(frame_index)))
+
+#         depth_gt = generate_depth_map(calib_path, velo_filename, self.side_map[side])
+        depth_gt = np.load(velo_filename)
+        depth_gt=1/depth_gt #*5.4
+#         import pdb;pdb.set_trace()
+        depth_gt = skimage.transform.resize(
+            depth_gt, self.full_res_shape[::-1], order=0, preserve_range=True, mode='constant')
+
+        if do_flip:
+            depth_gt = np.fliplr(depth_gt)
+
+        return depth_gt
 
 class KITTIOdomDataset(KITTIDataset):
     """KITTI dataset for odometry training and testing

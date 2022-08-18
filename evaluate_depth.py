@@ -240,6 +240,144 @@ def evaluate(opt):
     print(("&{: 8.3f}  " * 7).format(*mean_errors.tolist()) + "\\\\")
     print("\n-> Done!")
 
+def evaluate_with_train(opt,depth_decoder,depth_decoder_stereo=None):
+    """Evaluates a pretrained model using a specified test set
+    """
+    MIN_DEPTH = 1e-3
+    MAX_DEPTH = 80
+
+
+    filenames = readlines(os.path.join(splits_dir, opt.eval_split, "test_files.txt"))
+ 
+    dataset = datasets.KITTI2015Dataset("kitti_2015", filenames, opt.height, opt.width,[0,"s"], 4, is_train=False,img_ext=".png")
+
+    dataloader = DataLoader(dataset, 8, shuffle=False, num_workers=opt.num_workers,
+                            pin_memory=True, drop_last=False)
+    if opt.model=="distill":
+        depth_decoder_stereo.cuda()
+        depth_decoder_stereo.eval()
+
+    depth_decoder.cuda()
+    depth_decoder.eval()
+
+    pred_disps = []
+    pred_disps_stereos = []
+    gt_disps = []
+    from tqdm import tqdm
+    with torch.no_grad():
+        for idx,data in enumerate(tqdm(dataloader)):
+            for key, ipt in data.items():
+                data[key] = ipt.cuda()
+
+            input_color = data[("color", 0, 0)].cuda()
+
+            if opt.post_process:
+                input_color = torch.cat((input_color, torch.flip(input_color, [3])), 0)
+            if opt.model=="stereo":
+                output = depth_decoder(data[("color", 0, 0)].cuda(),data[("color", "s", 0)].cuda())
+                pred_disp=output.cpu()[:, 0].numpy() #.shape
+#                 import pdb;pdb.set_trace()
+            elif opt.model=="distill":
+                output = depth_decoder_stereo(data[("color", 0, 0)].cuda(),data[("color", "s", 0)].cuda())
+                pred_disp_stereo=output.cpu()[:, 0].numpy() #.shape
+
+                pred_disps_stereos.append(pred_disp_stereo)
+                output = depth_decoder(data[("color", 0, 0)].cuda())
+                pred_disp=output[("disp", 0)].cpu()[:, 0].numpy() #.shape
+            else:
+                output = depth_decoder(data[("color", 0, 0)].cuda())
+                pred_disp=output[("disp", 0)].cpu()[:, 0].numpy() #.shape
+
+            pred_disps.append(pred_disp)
+    if opt.model=="distill":
+        pred_disps_stereos = np.concatenate(pred_disps_stereos)
+    pred_disps = np.concatenate(pred_disps)
+
+    gt_path = os.path.join(splits_dir, opt.eval_split, "gt_depths.npz")
+    gt_depths = np.load(gt_path, fix_imports=True, encoding='latin1',allow_pickle=True)["data"]
+
+    print("-> Evaluating")
+
+    if opt.eval_stereo:
+        print("   Stereo evaluation - "
+              "disabling median scaling, scaling by {}".format(STEREO_SCALE_FACTOR))
+        opt.disable_median_scaling = True
+        opt.pred_depth_scale_factor = STEREO_SCALE_FACTOR
+    else:
+        print("   Mono evaluation - using median scaling")
+
+    errors = []
+    errors_stereo = []
+    ratios = []
+
+    for i in tqdm(range(pred_disps.shape[0])):
+
+        gt_depth =gt_depths[i]
+
+        gt_height, gt_width = gt_depth.shape[:2]
+        if opt.model=="distill":
+            pred_disp_stereo = pred_disps_stereos[i]
+            pred_disp_stereo = cv2.resize(pred_disp_stereo, (gt_width, gt_height))
+        pred_disp = pred_disps[i]
+        pred_disp = cv2.resize(pred_disp, (gt_width, gt_height))
+
+
+        if opt.model=="stereo":
+            pred_depth =  0.54*0.58/(pred_disp)/5.4
+        elif opt.model=="distill":
+            pred_disp_stereo =  0.54*0.58*640/(pred_disp_stereo*640)/5.4
+            pred_depth =  0.54*0.58*640/(pred_disp*640)/5.4
+            
+        else:
+            pred_depth =  0.54*0.58*640/(pred_disp*640)/5.4
+            
+#         if opt.eval_split == "eigen" or :
+        mask = np.logical_and(gt_depth > MIN_DEPTH, gt_depth < MAX_DEPTH)
+
+        crop = np.array([0.40810811 * gt_height, 0.99189189 * gt_height,
+                         0.03594771 * gt_width,  0.96405229 * gt_width]).astype(np.int32)
+        crop_mask = np.zeros(mask.shape)
+        crop_mask[crop[0]:crop[1], crop[2]:crop[3]] = 1
+        mask = np.logical_and(mask, crop_mask)
+
+#         else:
+#         mask = gt_depth > 0
+
+        pred_depth = pred_depth[mask]
+        gt_depth = gt_depth[mask]
+        if opt.model=="distill":
+            pred_disp_stereo =  pred_disp_stereo[mask]
+            pred_disp_stereo *= opt.pred_depth_scale_factor
+            pred_disp_stereo[pred_disp_stereo < MIN_DEPTH] = MIN_DEPTH
+            pred_disp_stereo[pred_disp_stereo > MAX_DEPTH] = MAX_DEPTH
+            errors_stereo.append(compute_errors(gt_depth, pred_disp_stereo))
+        pred_depth *= opt.pred_depth_scale_factor
+
+
+        pred_depth[pred_depth < MIN_DEPTH] = MIN_DEPTH
+        pred_depth[pred_depth > MAX_DEPTH] = MAX_DEPTH
+
+        errors.append(compute_errors(gt_depth, pred_depth))
+
+    if not opt.disable_median_scaling:
+        ratios = np.array(ratios)
+        med = np.median(ratios)
+        print(" Scaling ratios | med: {:0.3f} | std: {:0.3f}".format(med, np.std(ratios / med)))
+    if opt.model=="distill":
+        mean_errors = np.array(errors_stereo).mean(0)
+        print("\n-> ###################################################### Stereo")
+        print("\n  " + ("{:>8} | " * 7).format("abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
+        print(("&{: 8.3f}  " * 7).format(*mean_errors.tolist()) + "\\\\")
+        print("\n-> ###################################################### Mono")
+    mean_errors = np.array(errors).mean(0)
+
+    print("\n  " + ("{:>8} | " * 7).format("abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
+    print(("&{: 8.3f}  " * 7).format(*mean_errors.tolist()) + "\\\\")
+    print("\n-> Done!")
+    results_error={"abs_rel":mean_errors[0],"sq_rel":mean_errors[1],"rmse":mean_errors[2],\
+                  "rmse_log":mean_errors[3],"a1":mean_errors[4],"a2":mean_errors[5],\
+                  "a3":mean_errors[6]}
+    return results_error
 
 if __name__ == "__main__":
     options = MonodepthOptions()

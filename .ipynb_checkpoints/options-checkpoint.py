@@ -42,7 +42,7 @@ class MonodepthOptions:
         self.parser.add_argument("--split",
                                  type=str,
                                  help="which training split to use",
-                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark"],
+                                 choices=["eigen_zhou", "eigen_full", "odom", "benchmark", "kitti_2015"],
                                  default="eigen_zhou")
         self.parser.add_argument("--num_layers",
                                  type=int,
@@ -68,7 +68,7 @@ class MonodepthOptions:
         self.parser.add_argument("--disparity_smoothness",
                                  type=float,
                                  help="disparity smoothness weight",
-                                 default=1e-3)
+                                 default=0.01)
         self.parser.add_argument("--scales",
                                  nargs="+",
                                  type=int,
@@ -197,7 +197,7 @@ class MonodepthOptions:
                                  type=str,
                                  default="eigen",
                                  choices=[
-                                    "eigen", "eigen_benchmark","eigen_zhou", "benchmark", "odom_9", "odom_10"],
+                                    "eigen", "eigen_benchmark","eigen_zhou", "kitti_2015", "benchmark", "odom_9", "odom_10"],
                                  help="which split to run eval on")
         self.parser.add_argument("--save_pred_disps",
                                  help="if set saves predicted disparities",

@@ -30,6 +30,8 @@ import tarfile
 from models.cfnet import cfnet
 from models.gwcnet import GwcNet
 from pwcnet import Network as pwcnet
+from evaluate_depth import evaluate_with_train
+
 def set_random_seed(seed):
     if seed >= 0:
         print("Set random seed@@@@@@@@@@@@@@@@@@@@")
@@ -69,16 +71,16 @@ class Trainer:
         if os.path.isdir(self.log_path) is False:
             os.makedirs(self.log_path)
         tar = tarfile.open( os.path.join(self.log_path, 'sources.tar'), 'w' )
-        if not self.opt.debug: 
-            tar.add( 'networks' )
-            tar.add( 'trainer.py' )
-            tar.add( 'train.py' )
-            tar.add( 'train.sh' )
-            tar.add( 'utils.py' )
-            tar.add( 'datasets' )
-            tar.add( 'layers.py' )
-            tar.add( 'options.py' )
-            tar.close()
+#         if not self.opt.debug: 
+        tar.add( 'networks' )
+        tar.add( 'trainer.py' )
+        tar.add( 'train.py' )
+        tar.add( 'train.sh' )
+        tar.add( 'utils.py' )
+        tar.add( 'datasets' )
+        tar.add( 'layers.py' )
+        tar.add( 'options.py' )
+        tar.close()
         #######################
         self.models = {}
         self.parameters_to_train = []
@@ -211,7 +213,11 @@ class Trainer:
             self.run_epoch()
             if (self.epoch + 1) % self.opt.save_frequency == 0:
                 self.save_model()
-
+                if self.opt.model=="distill":
+                    eval_metric=evaluate_with_train(self.opt,self.models["depth"],self.models["depth_stereo"])
+                else:
+                    eval_metric=evaluate_with_train(self.opt,self.models["depth"])
+#                 self.log_eval(eval_metric)
     def run_epoch(self):
         """Run a single epoch of training and validation
         """
@@ -416,14 +422,14 @@ class Trainer:
     
     def make_occ_map(self, disp_left, disp_right):
         
-        depth_left=0.54*0.58*640/(640*disp_left)
-        depth_right=0.54*0.58*640/(640*disp_right)
+        depth_left=0.54*0.58/(disp_left)
+        depth_right=0.54*0.58/(disp_right)
 
         disp_right_warped, flow_field_r = self.apply_disparity(-depth_left, -disp_left) 
         disp_left_warped, flow_field_l = self.apply_disparity(-depth_right, disp_right) 
 
-        occ_map_left = (torch.abs(depth_left + disp_right_warped) >= 2.0).type(torch.LongTensor).cuda()
-        occ_map_right = (torch.abs(depth_right + disp_left_warped) >= 2.0).type(torch.LongTensor).cuda()
+        occ_map_left = (torch.abs(depth_left + disp_right_warped) >= 3.0).type(torch.LongTensor).cuda()
+        occ_map_right = (torch.abs(depth_right + disp_left_warped) >= 3.0).type(torch.LongTensor).cuda()
 
         occ_map_left[(flow_field_r<0).unsqueeze(1)]=1
         occ_map_left[(flow_field_r>1).unsqueeze(1)]=1
@@ -474,7 +480,7 @@ class Trainer:
             outputs[("depth", 0, scale,"stereo",i)] = depth
             for ii, frame_id in enumerate(self.opt.frame_ids[1:]):
                 T = inputs["stereo_T"]                
-                T_=T[:,0,3].clone().repeat((640,192,1,1)).permute((3,2,1,0))*10
+                T_=T[:,0,3].clone().repeat((self.opt.width,self.opt.height,1,1)).permute((3,2,1,0))*10
                 outputs[("color", frame_id, scale,"stereo",i)],_=self.apply_disparity(inputs[("color", frame_id, source_scale)], T_*disp)
                 
     def generate_images_pred_stereo(self, inputs, outputs):
@@ -818,7 +824,7 @@ class Trainer:
             total_loss += loss
             losses["loss_stereo/{}".format(i)] = loss
 
-        total_loss += loss
+#         total_loss += loss
         total_loss /= len(st_output)#+1
         if self.opt.model=="distill" :
             outputs["stereo_disp_filter"]=depth_min
